@@ -290,3 +290,20 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
+
+# ERROR 2026 (HY000): SSL connection error: unknown error number
+
+# 这是 本机 MySQL 客户端 TLS 握手失败（Windows 上旧版 mysql 客户端连 TiDB Cloud 很常见），不是 SQL 写错。你们仓库里的 import_sql_tidb.py 注释也写了这一点。
+
+# 用 Python 删库（和复制脚本同一套连接方式）：
+
+# py -3 -c "import ssl,pymysql; from pathlib import Path; ca=str(Path('isrgrootx1_ca.pem').resolve()); ctx=ssl.create_default_context(cafile=ca); c=pymysql.connect(host='gateway01.sa-east-1.prod.aws.tidbcloud.com',port=4000,user='你的前缀.root',password='你的密码',charset='utf8mb4',ssl=ctx); cur=c.cursor(); cur.execute('DROP DATABASE IF EXISTS `test`'); c.commit(); print('done'); c.close()"
+# 在 aitools 目录下执行，把用户名/密码换成目标集群 Connect 里复制的。
+
+# 其它可选：
+
+# 用 DBeaver / DataGrip，开启 SSL，CA 指向 isrgrootx1_ca.pem
+# 升级到较新的 MySQL Shell / MariaDB 客户端后再用 --ssl-mode=VERIFY_IDENTITY --ssl-ca=...
+# 不要用不带 TLS 的连接；TiDB Cloud 公网要求 TLS。
