@@ -291,7 +291,11 @@ def main() -> int:
 if __name__ == "__main__":
     raise SystemExit(main())
 
+# 执行命令：
+# py -3 copy_tidb_db.py --dst-user "粘贴的用户名" --dst-password "粘贴的密码"
 
+
+################################################################################
 
 # ERROR 2026 (HY000): SSL connection error: unknown error number
 
