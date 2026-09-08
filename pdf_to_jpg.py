@@ -1,14 +1,20 @@
 # -*- coding: utf-8 -*-
 """将 PDF 按页渲染为 JPG 图片。"""
 
+import shutil
 import time
+import zipfile
 from pathlib import Path
 
 import fitz  # PyMuPDF
 
-# 只需改这一处名称；PDF / 输出目录会据此推导
-NAME = "22-神经网络基础与Tensorflow实战"
-WORK_DIR = Path(r"e:\tmp") / NAME / NAME
+# 手动改这里：源 zip 路径。课程名 / PDF / 输出目录均由其文件名推导
+ZIP_PATH = Path(r"e:\source\22-神经网络基础与Tensorflow实战.zip")
+TMP_DIR = Path(r"e:\tmp")
+
+NAME = ZIP_PATH.stem
+COURSE_DIR = TMP_DIR / NAME
+WORK_DIR = COURSE_DIR / NAME
 PDF_PATH = WORK_DIR / f"{NAME}.pdf"
 OUT_DIR = WORK_DIR / f"{NAME}_pdf_2_imgs"
 
@@ -17,6 +23,47 @@ ZOOM = 2.0
 JPEG_QUALITY = 90
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
 MARKDOWN_ASSET_DIR = "Assets"
+
+
+def _zip_entry_name(info: zipfile.ZipInfo) -> str:
+    if info.flag_bits & 0x800:
+        return info.filename
+    try:
+        return info.filename.encode("cp437").decode("gbk")
+    except UnicodeError:
+        return info.filename
+
+
+def extract_zip(zip_path: Path, dest: Path) -> None:
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            name = _zip_entry_name(info)
+            target = dest / name
+            if info.is_dir() or name.endswith("/"):
+                target.mkdir(parents=True, exist_ok=True)
+                continue
+            target.parent.mkdir(parents=True, exist_ok=True)
+            with zf.open(info) as src, target.open("wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
+def ensure_course_dir() -> None:
+    if COURSE_DIR.is_dir():
+        return
+    if not ZIP_PATH.is_file():
+        raise FileNotFoundError(f"ZIP 不存在: {ZIP_PATH}")
+
+    TMP_DIR.mkdir(parents=True, exist_ok=True)
+    dest_zip = TMP_DIR / ZIP_PATH.name
+    if dest_zip.resolve() != ZIP_PATH.resolve():
+        shutil.copy2(ZIP_PATH, dest_zip)
+        print(f"已拷贝 ZIP: {dest_zip}")
+
+    print(f"正在解压: {dest_zip} -> {TMP_DIR}")
+    extract_zip(dest_zip, TMP_DIR)
+    if not COURSE_DIR.is_dir():
+        raise FileNotFoundError(f"解压后未找到目录: {COURSE_DIR}")
+    print(f"已解压: {COURSE_DIR}")
 
 
 def print_markdown_images(out_dir: Path, save_dir: Path) -> None:
@@ -41,6 +88,7 @@ def print_markdown_images(out_dir: Path, save_dir: Path) -> None:
 
 
 def main() -> None:
+    ensure_course_dir()
     if not PDF_PATH.is_file():
         raise FileNotFoundError(f"PDF 不存在: {PDF_PATH}")
 
