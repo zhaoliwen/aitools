@@ -6,13 +6,19 @@
 
 启动后先弹出可编辑确认窗，点击「执行」后才开始导出。
 默认输出：G:\\文件\\vitaband_test-tidebase-YYYYMMDDHHmm.sql
+
+无界面（计划任务）：
+  py -3 export_sql_tidb.py --config "G:\\文件\\export_tidb_config.json"
+  每次会按当前时间刷新输出文件名；若必须沿用配置里的路径，加 --keep-sql-path。
 """
 
 from __future__ import annotations
 
+import argparse
 import json
 import re
 import ssl
+import sys
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -288,10 +294,95 @@ DEFAULT_BATCH_SIZE = "1000"
 DEFAULT_OUT_DIR = Path(r"G:\文件")
 
 
-def default_sql_path(database: str) -> Path:
+def default_sql_path(database: str, out_dir: Path | None = None) -> Path:
     stamp = datetime.now().strftime("%Y%m%d%H%M")
     name = f"{database.strip() or 'vitaband_test'}-tidebase-{stamp}.sql"
-    return DEFAULT_OUT_DIR / name
+    return (out_dir or DEFAULT_OUT_DIR) / name
+
+
+_SQL_STAMP_NAME = re.compile(r"^(.*-tidebase-)\d{12}(\.sql)$", re.IGNORECASE)
+
+
+def refresh_sql_file_stamp(sql_file: str, database: str) -> str:
+    """只替换文件名里的 YYYYMMDDHHmm，目录和前缀保持配置里的。"""
+    stamp = datetime.now().strftime("%Y%m%d%H%M")
+    if sql_file:
+        path = Path(sql_file)
+        parent = path.parent
+        m = _SQL_STAMP_NAME.match(path.name)
+        if m:
+            return str(parent / f"{m.group(1)}{stamp}{m.group(2)}")
+        return str(default_sql_path(database, parent))
+    return str(default_sql_path(database))
+
+
+def load_config_file(path: Path) -> dict:
+    data = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("配置文件内容必须是 JSON 对象。")
+    return data
+
+
+def parse_export_config(data: dict, *, refresh_sql_stamp: bool) -> dict:
+    host = str(data.get("host") or "").strip()
+    user = str(data.get("user") or "").strip()
+    password = str(data.get("password") or "")
+    database = str(data.get("database") or "").strip()
+    sql_file = str(data.get("sql_file") or "").strip()
+    ssl_ca = str(data.get("ssl_ca") or "").strip() or None
+    try:
+        port = int(str(data.get("port") or "").strip())
+        batch_size = int(str(data.get("batch_size") or DEFAULT_BATCH_SIZE).strip())
+    except ValueError as e:
+        raise ValueError("端口和每批行数必须是数字。") from e
+    if batch_size <= 0:
+        raise ValueError("每批行数必须大于 0。")
+    if not host or not user or not password.strip() or not database:
+        raise ValueError("主机、用户名、密码、数据库均不能为空。")
+    if ssl_ca and not Path(ssl_ca).is_file():
+        raise ValueError(f"SSL CA 文件不存在：{ssl_ca}")
+
+    if refresh_sql_stamp or not sql_file:
+        sql_file = refresh_sql_file_stamp(sql_file, database)
+    return {
+        "host": host,
+        "port": port,
+        "user": user,
+        "password": password,
+        "database": database,
+        "sql_file": Path(sql_file),
+        "ssl_ca": ssl_ca,
+        "batch_size": batch_size,
+        "include_views": bool(data.get("include_views")),
+    }
+
+
+def run_from_config(config_path: Path, *, refresh_sql_stamp: bool) -> int:
+    cfg_path = config_path.expanduser().resolve()
+    if not cfg_path.is_file():
+        print(f"找不到配置文件: {cfg_path}", file=sys.stderr)
+        return 2
+    try:
+        data = load_config_file(cfg_path)
+        args = parse_export_config(data, refresh_sql_stamp=refresh_sql_stamp)
+    except (OSError, json.JSONDecodeError, ValueError) as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    print(f"使用配置: {cfg_path}")
+    print(f"输出文件: {args['sql_file']}")
+    export_database(
+        host=args["host"],
+        port=args["port"],
+        user=args["user"],
+        password=args["password"],
+        database=args["database"],
+        sql_file=args["sql_file"],
+        ssl_ca=args["ssl_ca"],
+        batch_size=args["batch_size"],
+        include_views=args["include_views"],
+        log=print,
+    )
+    return 0
 
 
 def run_gui() -> int:
@@ -426,6 +517,7 @@ def run_gui() -> int:
                 var.set(str(data[key]))
         if "include_views" in data:
             include_views_var.set(bool(data["include_views"]))
+        sql_var.set(refresh_sql_file_stamp(sql_var.get(), database_var.get()))
 
     def config_initial_dir() -> str:
         if DEFAULT_OUT_DIR.is_dir():
@@ -504,29 +596,26 @@ def run_gui() -> int:
         load_cfg_btn.configure(state=state)
 
     def do_export() -> None:
-        host = host_var.get().strip()
-        user = user_var.get().strip()
-        password = password_var.get()
-        database = database_var.get().strip()
-        sql_file = sql_var.get().strip()
-        ssl_ca = ssl_ca_var.get().strip() or None
         try:
-            port = int(port_var.get().strip())
-            batch_size = int(batch_var.get().strip())
-        except ValueError:
-            messagebox.showerror("参数错误", "端口和每批行数必须是数字。")
-            return
-        if batch_size <= 0:
-            messagebox.showerror("参数错误", "每批行数必须大于 0。")
-            return
-        if not host or not user or not password.strip() or not database or not sql_file:
-            messagebox.showerror("参数错误", "主机、用户名、密码、数据库、输出文件均不能为空。")
-            return
-        if ssl_ca and not Path(ssl_ca).is_file():
-            messagebox.showerror("参数错误", f"SSL CA 文件不存在：{ssl_ca}")
+            args = parse_export_config(
+                {
+                    "host": host_var.get(),
+                    "port": port_var.get(),
+                    "user": user_var.get(),
+                    "password": password_var.get(),
+                    "database": database_var.get(),
+                    "sql_file": sql_var.get(),
+                    "ssl_ca": ssl_ca_var.get(),
+                    "batch_size": batch_var.get(),
+                    "include_views": include_views_var.get(),
+                },
+                refresh_sql_stamp=False,
+            )
+        except ValueError as e:
+            messagebox.showerror("参数错误", str(e))
             return
 
-        out_path = Path(sql_file)
+        out_path = args["sql_file"]
         if out_path.exists():
             if not messagebox.askyesno("覆盖确认", f"文件已存在，是否覆盖？\n{out_path}"):
                 return
@@ -539,18 +628,7 @@ def run_gui() -> int:
         def worker() -> None:
             err: BaseException | None = None
             try:
-                export_database(
-                    host=host,
-                    port=port,
-                    user=user,
-                    password=password,
-                    database=database,
-                    sql_file=out_path,
-                    ssl_ca=ssl_ca,
-                    batch_size=batch_size,
-                    include_views=include_views_var.get(),
-                    log=log,
-                )
+                export_database(**args, log=log)
             except BaseException as e:
                 err = e
                 log(str(e))
@@ -572,6 +650,20 @@ def run_gui() -> int:
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser(description="Export a TiDB database to a .sql dump.")
+    ap.add_argument(
+        "--config",
+        type=Path,
+        help="JSON 配置文件（窗口里「导出配置」保存的那种）。指定后不弹窗，直接导出。",
+    )
+    ap.add_argument(
+        "--keep-sql-path",
+        action="store_true",
+        help="使用配置里的输出路径；默认会按当前时间生成新的 *-tidebase-YYYYMMDDHHmm.sql",
+    )
+    args = ap.parse_args()
+    if args.config:
+        return run_from_config(args.config, refresh_sql_stamp=not args.keep_sql_path)
     return run_gui()
 
 
