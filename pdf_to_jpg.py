@@ -16,13 +16,13 @@ NAME = ZIP_PATH.stem
 COURSE_DIR = TMP_DIR / NAME
 WORK_DIR = COURSE_DIR / NAME
 PDF_PATH = WORK_DIR / f"{NAME}.pdf"
-OUT_DIR = WORK_DIR / f"{NAME}_pdf_2_imgs"
+MARKDOWN_ASSET_DIR = "Assets"
+OUT_DIR = WORK_DIR / MARKDOWN_ASSET_DIR / f"{NAME}_pdf_2_imgs"
 
 # 渲染缩放（2.0 ≈ 144 DPI，清晰度足够）
 ZOOM = 2.0
 JPEG_QUALITY = 90
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}
-MARKDOWN_ASSET_DIR = "Assets"
 
 
 def _zip_entry_name(info: zipfile.ZipInfo) -> str:
