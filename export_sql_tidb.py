@@ -1,11 +1,11 @@
 """
 将 TiDB 库中的全部基表（结构 + 数据）导出为 .sql。
 
-连接方式、默认源库与 copy_tidb_db.py 一致：TiDB Cloud 公网网关需 TLS；
+连接方式、默认目标库与 copy_tidb_db.py 一致：TiDB Cloud 公网网关需 TLS；
 可用 SSL CA（如 isrgrootx1_ca.pem）做证书校验。
 
 启动后先弹出可编辑确认窗，点击「执行」后才开始导出。
-默认输出：G:\\文件\\bootdo-tidebase-YYYYMMDDHHmm.sql
+默认输出：G:\\文件\\vitaband_test-tidebase-YYYYMMDDHHmm.sql
 """
 
 from __future__ import annotations
@@ -220,12 +220,12 @@ def export_database(
 ) -> None:
     database = database.strip()
     if database.lower() == "sys":
-        raise RuntimeError("拒绝导出系统库 sys，请指定业务库（默认 bootdo）。")
+        raise RuntimeError("拒绝导出系统库 sys，请指定业务库（默认 vitaband_test）。")
 
     sql_file = Path(sql_file)
     sql_file.parent.mkdir(parents=True, exist_ok=True)
 
-    log(f"连接源库 {host}/{database} ...")
+    log(f"连接目标库 {host}/{database} ...")
     conn = connect_tidb(
         host=host,
         port=port,
@@ -233,14 +233,14 @@ def export_database(
         password=password,
         database=database,
         ssl_ca=ssl_ca,
-        label="源库",
+        label="目标库",
     )
     cur = conn.cursor()
     try:
         tables = list_base_tables(cur)
-        log(f"源库基表数量: {len(tables)}")
+        log(f"目标库基表数量: {len(tables)}")
         if not tables:
-            log("源库没有基表，结束。")
+            log("目标库没有基表，结束。")
             return
 
         log(f"写入 {sql_file}")
@@ -262,7 +262,7 @@ def export_database(
 
             if include_views:
                 views = list_views(cur)
-                log(f"源库视图数量: {len(views)}")
+                log(f"目标库视图数量: {len(views)}")
                 for i, view in enumerate(views, 1):
                     log(f"[视图 {i}/{len(views)}] {view}")
                     dump_view(cur, view, out)
@@ -277,19 +277,19 @@ def export_database(
 
 # ---------- GUI ----------
 
-# 与 copy_tidb_db.py 源库（bootdo）一致，可在窗口里改
-DEFAULT_HOST = "gateway01.us-west-2.prod.aws.tidbcloud.com"
+# 与 copy_tidb_db.py 目标库（vitaband_test）一致；密码不预填，从 Connect 复制后粘贴
+DEFAULT_HOST = "gateway01.sa-east-1.prod.aws.tidbcloud.com"
 DEFAULT_PORT = "4000"
-DEFAULT_USER = "2AtNsm9Nf83Xr7d.root"
-DEFAULT_PASSWORD = "1oan6hGQ7SOy5diW"
-DEFAULT_DATABASE = "bootdo"
+DEFAULT_USER = "ug21YiZX1lSH2pL.root"
+DEFAULT_PASSWORD = ""
+DEFAULT_DATABASE = "vitaband_test"
 DEFAULT_BATCH_SIZE = "1000"
 DEFAULT_OUT_DIR = Path(r"G:\文件")
 
 
 def default_sql_path(database: str) -> Path:
     stamp = datetime.now().strftime("%Y%m%d%H%M")
-    name = f"{database.strip() or 'bootdo'}-tidebase-{stamp}.sql"
+    name = f"{database.strip() or 'vitaband_test'}-tidebase-{stamp}.sql"
     return DEFAULT_OUT_DIR / name
 
 
@@ -390,7 +390,7 @@ def run_gui() -> int:
 
     hint = ttk.Label(
         frm,
-        text="默认填充 copy_tidb_db.py 源库（bootdo）。确认后点「执行」。密码默认隐藏，点右侧眼睛可切换可见。",
+        text="默认填充 copy_tidb_db.py 目标库（vitaband_test）。密码请从 Connect 复制后粘贴；默认隐藏，点右侧眼睛可切换可见。",
         foreground="#555",
     )
     hint.grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
@@ -434,8 +434,8 @@ def run_gui() -> int:
         if batch_size <= 0:
             messagebox.showerror("参数错误", "每批行数必须大于 0。")
             return
-        if not host or not user or not database or not sql_file:
-            messagebox.showerror("参数错误", "主机、用户名、数据库、输出文件均不能为空。")
+        if not host or not user or not password.strip() or not database or not sql_file:
+            messagebox.showerror("参数错误", "主机、用户名、密码、数据库、输出文件均不能为空。")
             return
         if ssl_ca and not Path(ssl_ca).is_file():
             messagebox.showerror("参数错误", f"SSL CA 文件不存在：{ssl_ca}")
