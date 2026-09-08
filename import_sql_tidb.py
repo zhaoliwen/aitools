@@ -79,6 +79,9 @@ def tls_context(ca_pem: str | None):
 
 r'''
 py -3 g:\codes\import_sql_tidb.py --host gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com --port 4000 --user 2AtNsm9Nf83Xr7d.root --password XqItDX318Yae1BPg --database bootdo --sql-file G:\文件\bootdo-tidebase.sql
+
+导出（弹窗确认后再执行）：
+py -3 export_sql_tidb.py
 '''
 
 def main() -> int:
