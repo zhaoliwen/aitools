@@ -75,7 +75,7 @@ def print_markdown_images(out_dir: Path, save_dir: Path) -> None:
         return
 
     lines = [
-        f"![{img.stem.rsplit('_', 1)[0]}]({MARKDOWN_ASSET_DIR}/{img.name})"
+        f"![{img.stem.rsplit('_', 1)[0]}]({MARKDOWN_ASSET_DIR}/{NAME}_pdf_2_imgs/{img.name})"
         for img in images
     ]
 
