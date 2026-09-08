@@ -1,8 +1,8 @@
 """
-从 TiDB Cloud 导出库结构 + 数据为 .sql（TLS，与 import_sql_tidb.py 同一套连接方式）。
+将 TiDB 库中的全部基表（结构 + 数据）导出为 .sql。
 
-Requirements:
-  pip install pymysql
+连接方式、默认源库与 copy_tidb_db.py 一致：TiDB Cloud 公网网关需 TLS；
+可用 SSL CA（如 isrgrootx1_ca.pem）做证书校验。
 
 启动后先弹出可编辑确认窗，点击「执行」后才开始导出。
 默认输出：G:\\文件\\bootdo-tidebase-YYYYMMDDHHmm.sql
@@ -10,8 +10,8 @@ Requirements:
 
 from __future__ import annotations
 
+import re
 import ssl
-import sys
 import threading
 from datetime import date, datetime, timedelta
 from decimal import Decimal
@@ -20,10 +20,11 @@ from pathlib import Path
 import pymysql
 from pymysql.err import OperationalError
 
-# ---------- 连接辅助（与 import_sql_tidb.py 一致） ----------
+# ---------- 以下连接辅助逻辑自 copy_tidb_db.py 复制并沿用 ----------
 
 
 def _latin1_ok(label_cn: str, value: str) -> str | None:
+    """pymysql 建连时会把用户名/口令按 latin-1 编码；含非 Latin-1 会触发 UnicodeEncodeError。"""
     try:
         value.encode("latin1")
     except UnicodeEncodeError:
@@ -35,8 +36,6 @@ def _latin1_ok(label_cn: str, value: str) -> str | None:
 
 
 def _connect_access_denied_hint(exc: OperationalError) -> str | None:
-    import re
-
     if not exc.args:
         return None
     code = exc.args[0]
@@ -52,8 +51,10 @@ def _connect_access_denied_hint(exc: OperationalError) -> str | None:
         )
     if code == 1105:
         return (
-            "TiDB 返回 1105：账号或密码与当前集群不匹配（或缺少/错误的前缀用户名）。\n"
-            "请打开该集群的 Connect 对话框，复制其中的完整用户名（如 prefix.root）与密码后重试。\n"
+            "TiDB 返回 1105：当前用户名/密码未被该 Host 接受（与 TLS、是否指定库无关）。\n"
+            "  1. Host、Username、Password 必须来自同一集群的 Connect 对话框（共享网关靠前缀区分实例）。\n"
+            "  2. 在 Connect 里点 Generate Password 重新生成，立刻用「复制」粘贴（不要手打、不要用旧截图）。\n"
+            "  3. Username 必须是「前缀.root」完整串，不要只写 root。\n"
             f"原始错误：{raw}"
         )
     return None
@@ -63,47 +64,64 @@ def tls_context(ca_pem: str | None):
     if ca_pem:
         ctx = ssl.create_default_context(cafile=ca_pem)
         return ctx
+
     ctx = ssl.create_default_context()
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE
     return ctx
 
 
-def connect_tidb(*, host: str, port: int, user: str, password: str, database: str, ssl_ca: str | None):
+def connect_tidb(
+    *,
+    host: str,
+    port: int,
+    user: str,
+    password: str,
+    database: str | None,
+    ssl_ca: str | None,
+    label: str,
+):
+    """建立 TiDB TLS 连接（与 copy_tidb_db.py 相同）。"""
     user = user.strip()
     password = password.strip()
-    database = (database or "").strip()
+    if database is not None:
+        database = database.strip() or None
 
-    if msg := _latin1_ok("用户名", user):
+    if msg := _latin1_ok(f"{label} 用户名", user):
         raise RuntimeError(msg)
-    if msg := _latin1_ok("密码", password):
+    if msg := _latin1_ok(f"{label} 密码", password):
         raise RuntimeError(msg)
-    if not database:
-        raise RuntimeError("数据库名称不能为空。")
 
     ssl_ctx = tls_context(ssl_ca)
     try:
         return pymysql.connect(
-            host=host.strip(),
+            host=host,
             port=port,
             user=user,
             password=password,
             database=database,
             charset="utf8mb4",
-            autocommit=True,
+            autocommit=False,
             ssl=ssl_ctx,
         )
     except OperationalError as e:
         if hint := _connect_access_denied_hint(e):
-            raise RuntimeError(hint) from e
+            raise RuntimeError(f"[{label}] {hint}") from e
         raise
 
 
-# ---------- SQL 导出 ----------
+def list_base_tables(cur) -> list[str]:
+    cur.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
+    # 列名形如 Tables_in_xxx / Table_type
+    return [row[0] for row in cur.fetchall()]
 
 
-def _ident(name: str) -> str:
-    return "`" + name.replace("`", "``") + "`"
+def list_views(cur) -> list[str]:
+    cur.execute("SHOW FULL TABLES WHERE Table_type = 'VIEW'")
+    return [row[0] for row in cur.fetchall()]
+
+
+# ---------- 导出逻辑（表结构/数据遍历方式与 copy_tidb_db.py 一致） ----------
 
 
 def _sql_literal(value) -> str:
@@ -118,6 +136,8 @@ def _sql_literal(value) -> str:
             return "NULL"
         return repr(value)
     if isinstance(value, datetime):
+        if value.microsecond:
+            return "'" + value.strftime("%Y-%m-%d %H:%M:%S.%f") + "'"
         return "'" + value.strftime("%Y-%m-%d %H:%M:%S") + "'"
     if isinstance(value, date):
         return "'" + value.strftime("%Y-%m-%d") + "'"
@@ -129,7 +149,8 @@ def _sql_literal(value) -> str:
         m, s = divmod(rem, 60)
         return f"'{sign}{h:02d}:{m:02d}:{s:02d}'"
     if isinstance(value, (bytes, bytearray, memoryview)):
-        return "0x" + bytes(value).hex() if value else "''"
+        raw = bytes(value)
+        return "0x" + raw.hex() if raw else "''"
     text = str(value)
     escaped = (
         text.replace("\\", "\\\\")
@@ -141,71 +162,47 @@ def _sql_literal(value) -> str:
     return f"'{escaped}'"
 
 
-def list_base_tables(cur) -> list[str]:
-    cur.execute("SHOW FULL TABLES WHERE Table_type = 'BASE TABLE'")
-    return [row[0] for row in cur.fetchall()]
-
-
-def list_views(cur) -> list[str]:
-    cur.execute("SHOW FULL TABLES WHERE Table_type = 'VIEW'")
-    return [row[0] for row in cur.fetchall()]
-
-
-def _insertable_columns(cur, table: str) -> list[str]:
-    cur.execute(f"SHOW COLUMNS FROM {_ident(table)}")
-    cols = []
-    for row in cur.fetchall():
-        extra = (row[5] or "").upper()
-        if "GENERATED" in extra or "VIRTUAL" in extra:
-            continue
-        cols.append(row[0])
-    return cols
-
-
-def dump_table(conn, cur, table: str, out, batch_size: int, log) -> int:
-    ident = _ident(table)
-    cur.execute(f"SHOW CREATE TABLE {ident}")
+def dump_table_structure(cur, table: str, out) -> None:
+    cur.execute(f"SHOW CREATE TABLE `{table}`")
     row = cur.fetchone()
     if not row:
         raise RuntimeError(f"无法获取表结构: {table}")
     create_sql = row[1].rstrip().rstrip(";")
-    out.write(f"DROP TABLE IF EXISTS {ident};\n")
+    out.write(f"DROP TABLE IF EXISTS `{table}`;\n")
     out.write(f"{create_sql};\n\n")
 
-    cols = _insertable_columns(cur, table)
+
+def dump_table_data(cur, table: str, out, batch_size: int) -> int:
+    cur.execute(f"SELECT * FROM `{table}`")
+    cols = [d[0] for d in cur.description]
     if not cols:
-        log(f"  表 {table}: 无可插入列，仅导出结构")
         return 0
 
-    col_sql = ", ".join(_ident(c) for c in cols)
-    cur.execute(f"SELECT {col_sql} FROM {ident}")
+    col_list = ", ".join(f"`{c}`" for c in cols)
     total = 0
     while True:
         rows = cur.fetchmany(batch_size)
         if not rows:
             break
-        out.write(f"INSERT INTO {ident} ({col_sql}) VALUES\n")
-        lines = []
-        for r in rows:
-            lines.append("(" + ", ".join(_sql_literal(v) for v in r) + ")")
+        out.write(f"INSERT INTO `{table}` ({col_list}) VALUES\n")
+        lines = ["(" + ", ".join(_sql_literal(v) for v in r) + ")" for r in rows]
         out.write(",\n".join(lines))
         out.write(";\n")
         total += len(rows)
-    out.write("\n")
-    log(f"  表 {table}: {total} 行")
+    if total:
+        out.write("\n")
     return total
 
 
-def dump_view(cur, view: str, out, log) -> None:
-    ident = _ident(view)
-    cur.execute(f"SHOW CREATE VIEW {ident}")
+def dump_view(cur, view: str, out) -> None:
+    cur.execute(f"SHOW CREATE VIEW `{view}`")
     row = cur.fetchone()
     if not row:
         raise RuntimeError(f"无法获取视图定义: {view}")
+    # SHOW CREATE VIEW 返回: View, Create View, character_set_client, collation_connection
     create_sql = row[1].rstrip().rstrip(";")
-    out.write(f"DROP VIEW IF EXISTS {ident};\n")
+    out.write(f"DROP VIEW IF EXISTS `{view}`;\n")
     out.write(f"{create_sql};\n\n")
-    log(f"  视图 {view}")
 
 
 def export_database(
@@ -218,12 +215,17 @@ def export_database(
     sql_file: Path,
     ssl_ca: str | None,
     batch_size: int,
+    include_views: bool,
     log,
 ) -> None:
+    database = database.strip()
+    if database.lower() == "sys":
+        raise RuntimeError("拒绝导出系统库 sys，请指定业务库（默认 bootdo）。")
+
     sql_file = Path(sql_file)
     sql_file.parent.mkdir(parents=True, exist_ok=True)
 
-    log(f"连接 {host}:{port} / {database} ...")
+    log(f"连接源库 {host}/{database} ...")
     conn = connect_tidb(
         host=host,
         port=port,
@@ -231,14 +233,17 @@ def export_database(
         password=password,
         database=database,
         ssl_ca=ssl_ca,
+        label="源库",
     )
     cur = conn.cursor()
     try:
         tables = list_base_tables(cur)
-        views = list_views(cur)
-        log(f"基表 {len(tables)} 张，视图 {len(views)} 个")
-        log(f"写入 {sql_file}")
+        log(f"源库基表数量: {len(tables)}")
+        if not tables:
+            log("源库没有基表，结束。")
+            return
 
+        log(f"写入 {sql_file}")
         with sql_file.open("w", encoding="utf-8", newline="\n") as out:
             now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             out.write(f"-- TiDB dump\n-- Database: {database}\n-- Date: {now}\n\n")
@@ -247,16 +252,24 @@ def export_database(
 
             total_rows = 0
             for i, table in enumerate(tables, 1):
-                log(f"[{i}/{len(tables)}] 导出表 {table}")
-                total_rows += dump_table(conn, cur, table, out, batch_size, log)
+                log(f"[{i}/{len(tables)}] 导出表结构: {table}")
+                dump_table_structure(cur, table, out)
 
-            for i, view in enumerate(views, 1):
-                log(f"[视图 {i}/{len(views)}] {view}")
-                dump_view(cur, view, out, log)
+                log(f"[{i}/{len(tables)}] 导出表数据: {table} ...")
+                n = dump_table_data(cur, table, out, batch_size)
+                total_rows += n
+                log(f"  {n} 行")
+
+            if include_views:
+                views = list_views(cur)
+                log(f"源库视图数量: {len(views)}")
+                for i, view in enumerate(views, 1):
+                    log(f"[视图 {i}/{len(views)}] {view}")
+                    dump_view(cur, view, out)
 
             out.write("SET FOREIGN_KEY_CHECKS=1;\n")
 
-        log(f"完成：{len(tables)} 张表，{total_rows} 行，文件 {sql_file}")
+        log(f"全部完成。{len(tables)} 张表，{total_rows} 行，文件 {sql_file}")
     finally:
         cur.close()
         conn.close()
@@ -264,12 +277,13 @@ def export_database(
 
 # ---------- GUI ----------
 
-# 与 import_sql_tidb.py 注释中的目标库一致，可在窗口里改
-DEFAULT_HOST = "gateway01.ap-southeast-1.prod.alicloud.tidbcloud.com"
+# 与 copy_tidb_db.py 源库（bootdo）一致，可在窗口里改
+DEFAULT_HOST = "gateway01.us-west-2.prod.aws.tidbcloud.com"
 DEFAULT_PORT = "4000"
 DEFAULT_USER = "2AtNsm9Nf83Xr7d.root"
-DEFAULT_PASSWORD = "XqItDX318Yae1BPg"
+DEFAULT_PASSWORD = "1oan6hGQ7SOy5diW"
 DEFAULT_DATABASE = "bootdo"
+DEFAULT_BATCH_SIZE = "1000"
 DEFAULT_OUT_DIR = Path(r"G:\文件")
 
 
@@ -288,8 +302,8 @@ def run_gui() -> int:
 
     root = tk.Tk()
     root.title("导出 TiDB 数据库")
-    root.minsize(640, 520)
-    root.geometry("720x580")
+    root.minsize(640, 560)
+    root.geometry("740x620")
 
     try:
         root.tk.call("tk", "scaling", 1.2)
@@ -309,10 +323,12 @@ def run_gui() -> int:
     database_var = tk.StringVar(value=DEFAULT_DATABASE)
     sql_var = tk.StringVar(value=str(default_sql_path(DEFAULT_DATABASE)))
     ssl_ca_var = tk.StringVar(value=str(default_ca) if default_ca.is_file() else "")
+    batch_var = tk.StringVar(value=DEFAULT_BATCH_SIZE)
+    include_views_var = tk.BooleanVar(value=False)
 
-    def add_row(row: int, label: str, var: tk.StringVar, *, show: str | None = None) -> ttk.Entry:
+    def add_row(row: int, label: str, var: tk.StringVar) -> ttk.Entry:
         ttk.Label(frm, text=label).grid(row=row, column=0, sticky="e", **pad)
-        entry = ttk.Entry(frm, textvariable=var, show=show or "")
+        entry = ttk.Entry(frm, textvariable=var)
         entry.grid(row=row, column=1, sticky="ew", **pad)
         return entry
 
@@ -340,7 +356,7 @@ def run_gui() -> int:
     eye_btn = ttk.Button(pwd_row, text="👁", width=3, command=toggle_password)
     eye_btn.grid(row=0, column=1, padx=(6, 0))
 
-    add_row(4, "数据库", database_var)
+    add_row(4, "数据库名称", database_var)
 
     ttk.Label(frm, text="输出文件").grid(row=5, column=0, sticky="e", **pad)
     out_row = ttk.Frame(frm)
@@ -366,24 +382,28 @@ def run_gui() -> int:
     ttk.Button(out_row, text="按库名刷新文件名", command=refresh_sql_name).grid(row=0, column=2, padx=(6, 0))
 
     add_row(6, "SSL CA（可选）", ssl_ca_var)
+    add_row(7, "每批行数", batch_var)
+
+    ttk.Checkbutton(frm, text="基表完成后导出视图定义（对应 copy_tidb_db.py --include-views）", variable=include_views_var).grid(
+        row=8, column=1, sticky="w", **pad
+    )
 
     hint = ttk.Label(
         frm,
-        text="确认以上信息后点击「执行」。密码默认隐藏，点右侧眼睛可切换可见。",
+        text="默认填充 copy_tidb_db.py 源库（bootdo）。确认后点「执行」。密码默认隐藏，点右侧眼睛可切换可见。",
         foreground="#555",
     )
-    hint.grid(row=7, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
+    hint.grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
 
     btn_row = ttk.Frame(frm)
-    btn_row.grid(row=8, column=0, columnspan=2, sticky="w", padx=10, pady=8)
+    btn_row.grid(row=10, column=0, columnspan=2, sticky="w", padx=10, pady=8)
     run_btn = ttk.Button(btn_row, text="执行")
     run_btn.pack(side=tk.LEFT)
-    close_btn = ttk.Button(btn_row, text="关闭", command=root.destroy)
-    close_btn.pack(side=tk.LEFT, padx=(8, 0))
+    ttk.Button(btn_row, text="关闭", command=root.destroy).pack(side=tk.LEFT, padx=(8, 0))
 
     log_box = scrolledtext.ScrolledText(frm, height=14, wrap=tk.WORD, state=tk.DISABLED)
-    log_box.grid(row=9, column=0, columnspan=2, sticky="nsew", padx=10, pady=(4, 0))
-    frm.rowconfigure(9, weight=1)
+    log_box.grid(row=11, column=0, columnspan=2, sticky="nsew", padx=10, pady=(4, 0))
+    frm.rowconfigure(11, weight=1)
 
     def log(msg: str) -> None:
         def _append() -> None:
@@ -407,8 +427,12 @@ def run_gui() -> int:
         ssl_ca = ssl_ca_var.get().strip() or None
         try:
             port = int(port_var.get().strip())
+            batch_size = int(batch_var.get().strip())
         except ValueError:
-            messagebox.showerror("参数错误", "端口必须是数字。")
+            messagebox.showerror("参数错误", "端口和每批行数必须是数字。")
+            return
+        if batch_size <= 0:
+            messagebox.showerror("参数错误", "每批行数必须大于 0。")
             return
         if not host or not user or not database or not sql_file:
             messagebox.showerror("参数错误", "主机、用户名、数据库、输出文件均不能为空。")
@@ -438,7 +462,8 @@ def run_gui() -> int:
                     database=database,
                     sql_file=out_path,
                     ssl_ca=ssl_ca,
-                    batch_size=200,
+                    batch_size=batch_size,
+                    include_views=include_views_var.get(),
                     log=log,
                 )
             except BaseException as e:
