@@ -201,7 +201,7 @@ def main() -> int:
     ap.add_argument("--dst-password", required=True, help="从目标集群 Connect 复制的密码（必填）")
     ap.add_argument(
         "--dst-database",
-        default="bodyfatdb",
+        default="vitaband_test",
         help="目标业务库名；不存在则自动创建。勿使用 sys。",
     )
     ap.add_argument(
