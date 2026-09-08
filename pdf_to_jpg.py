@@ -9,7 +9,7 @@ from pathlib import Path
 import fitz  # PyMuPDF
 
 # 手动改这里：源 zip 路径。课程名 / PDF / 输出目录均由其文件名推导
-ZIP_PATH = Path(r"e:\source\22-神经网络基础与Tensorflow实战.zip")
+ZIP_PATH = Path(r"E:\AllMy\LifeRecord\ThemeRecord\AI\AI大模型应用开发实战训练营\23-Pytorch与视觉检测.zip")
 TMP_DIR = Path(r"e:\tmp")
 
 NAME = ZIP_PATH.stem
