@@ -6,16 +6,11 @@ from pathlib import Path
 
 import fitz  # PyMuPDF
 
-PDF_PATH = Path(
-    r"e:\tmp\22-神经网络基础与Tensorflow实战"
-    r"\22-神经网络基础与Tensorflow实战"
-    r"\22-神经网络基础与Tensorflow实战.pdf"
-)
-OUT_DIR = Path(
-    r"e:\tmp\22-神经网络基础与Tensorflow实战"
-    r"\22-神经网络基础与Tensorflow实战"
-    r"\22-神经网络基础与Tensorflow实战_pdf_2_imgs"
-)
+# 只需改这一处名称；PDF / 输出目录会据此推导
+NAME = "22-神经网络基础与Tensorflow实战"
+WORK_DIR = Path(r"e:\tmp") / NAME / NAME
+PDF_PATH = WORK_DIR / f"{NAME}.pdf"
+OUT_DIR = WORK_DIR / f"{NAME}_pdf_2_imgs"
 
 # 渲染缩放（2.0 ≈ 144 DPI，清晰度足够）
 ZOOM = 2.0
