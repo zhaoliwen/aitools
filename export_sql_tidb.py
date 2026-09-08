@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import ssl
 import threading
@@ -395,10 +396,91 @@ def run_gui() -> int:
     )
     hint.grid(row=9, column=0, columnspan=2, sticky="w", padx=10, pady=(8, 4))
 
+    def collect_config() -> dict:
+        return {
+            "version": 1,
+            "host": host_var.get(),
+            "port": port_var.get(),
+            "user": user_var.get(),
+            "password": password_var.get(),
+            "database": database_var.get(),
+            "sql_file": sql_var.get(),
+            "ssl_ca": ssl_ca_var.get(),
+            "batch_size": batch_var.get(),
+            "include_views": bool(include_views_var.get()),
+        }
+
+    def apply_config(data: dict) -> None:
+        mapping = {
+            "host": host_var,
+            "port": port_var,
+            "user": user_var,
+            "password": password_var,
+            "database": database_var,
+            "sql_file": sql_var,
+            "ssl_ca": ssl_ca_var,
+            "batch_size": batch_var,
+        }
+        for key, var in mapping.items():
+            if key in data and data[key] is not None:
+                var.set(str(data[key]))
+        if "include_views" in data:
+            include_views_var.set(bool(data["include_views"]))
+
+    def config_initial_dir() -> str:
+        if DEFAULT_OUT_DIR.is_dir():
+            return str(DEFAULT_OUT_DIR)
+        return str(here)
+
+    def save_config() -> None:
+        path = filedialog.asksaveasfilename(
+            title="导出当前配置",
+            defaultextension=".json",
+            filetypes=[("JSON 配置", "*.json"), ("全部", "*.*")],
+            initialfile="export_tidb_config.json",
+            initialdir=config_initial_dir(),
+        )
+        if not path:
+            return
+        out = Path(path)
+        if out.exists():
+            if not messagebox.askyesno("覆盖确认", f"文件已存在，是否覆盖？\n{out}"):
+                return
+        try:
+            out.write_text(json.dumps(collect_config(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        except OSError as e:
+            messagebox.showerror("导出配置失败", str(e))
+            return
+        messagebox.showinfo("完成", f"配置已保存到：\n{out}")
+
+    def load_config() -> None:
+        path = filedialog.askopenfilename(
+            title="导入配置",
+            filetypes=[("JSON 配置", "*.json"), ("全部", "*.*")],
+            initialdir=config_initial_dir(),
+        )
+        if not path:
+            return
+        src = Path(path)
+        try:
+            data = json.loads(src.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as e:
+            messagebox.showerror("导入配置失败", str(e))
+            return
+        if not isinstance(data, dict):
+            messagebox.showerror("导入配置失败", "配置文件内容必须是 JSON 对象。")
+            return
+        apply_config(data)
+        messagebox.showinfo("完成", f"已从以下文件载入配置：\n{src}")
+
     btn_row = ttk.Frame(frm)
     btn_row.grid(row=10, column=0, columnspan=2, sticky="w", padx=10, pady=8)
     run_btn = ttk.Button(btn_row, text="执行")
     run_btn.pack(side=tk.LEFT)
+    save_cfg_btn = ttk.Button(btn_row, text="导出配置…", command=save_config)
+    save_cfg_btn.pack(side=tk.LEFT, padx=(8, 0))
+    load_cfg_btn = ttk.Button(btn_row, text="导入配置…", command=load_config)
+    load_cfg_btn.pack(side=tk.LEFT, padx=(8, 0))
     ttk.Button(btn_row, text="关闭", command=root.destroy).pack(side=tk.LEFT, padx=(8, 0))
 
     log_box = scrolledtext.ScrolledText(frm, height=14, wrap=tk.WORD, state=tk.DISABLED)
@@ -416,7 +498,10 @@ def run_gui() -> int:
         print(msg)
 
     def set_running(running: bool) -> None:
-        run_btn.configure(state=tk.DISABLED if running else tk.NORMAL)
+        state = tk.DISABLED if running else tk.NORMAL
+        run_btn.configure(state=state)
+        save_cfg_btn.configure(state=state)
+        load_cfg_btn.configure(state=state)
 
     def do_export() -> None:
         host = host_var.get().strip()
